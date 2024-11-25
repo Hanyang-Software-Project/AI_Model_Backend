@@ -8,8 +8,9 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install flask numpy apig-wsgi
 
 # Copy the application code and model into the container
-COPY src /var/task/src
-COPY model/CNN_RegDrop.pt /var/task/model/CNN_RegDrop.pt
+COPY app.py /var/task/app.py
+COPY model.py /var/task/model.py
+COPY CNN_RegDrop.pt /var/task/CNN_RegDrop.pt
 
 # Set the working directory to /var/task
 WORKDIR /var/task
@@ -18,4 +19,4 @@ WORKDIR /var/task
 ENV PYTHONPATH=/var/task
 
 # Set the Lambda handler for AWS
-CMD ["src.app.lambda_handler"]
+CMD ["app.lambda_handler"]

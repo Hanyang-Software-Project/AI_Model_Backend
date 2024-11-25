@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 
-from src.model import CNN_RegDrop
+from model import CNN_RegDrop
 
 
 # Function to preprocess a single file and run inference
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     device = 'cpu'
 
     # Load the trained model
-    model_path = "model/CNN_RegDrop.pt"
+    model_path = "CNN_RegDrop.pt"
     model = CNN_RegDrop()  # Replace CNN_RegDrop with your model class
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)  # Move the model to CPU

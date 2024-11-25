@@ -1,11 +1,8 @@
-import json
-import numpy as np
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 # Load the model
-MODEL_PATH = 'model/CNN_RegDrop.pt'
+MODEL_PATH = 'CNN_RegDrop.pt'
 
 class CNN_RegDrop(nn.Module):
     def __init__(self):

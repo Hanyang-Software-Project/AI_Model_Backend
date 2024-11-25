@@ -2,12 +2,18 @@ import numpy as np
 import torch
 from flask import Flask, request, jsonify
 from apig_wsgi import make_lambda_handler
-from src.model import CNN_RegDrop
+from model import CNN_RegDrop
+import uuid  # To create unique file names
+import boto3
+import json
 
 app = Flask(__name__)
 
+s3 = boto3.client('s3')  # Initialize S3 client
+BUCKET_NAME = 'my-predictions-bucket'  # Replace with your S3 bucket name
+
 # Load the trained model
-MODEL_PATH = "model/CNN_RegDrop.pt"
+MODEL_PATH = "CNN_RegDrop.pt"
 device = "cpu"  # Use CPU for inference
 model = CNN_RegDrop()
 model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
@@ -20,6 +26,16 @@ def predict():
     try:
         # Parse JSON input
         input_data = request.json
+
+        # Save input data to S3
+        unique_id = str(uuid.uuid4())  # Generate a unique file name
+        s3_key = f"input-data/{unique_id}.json"  # Define the S3 key (path in bucket)
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=json.dumps(input_data),  # Convert the data to JSON and save
+            ContentType="application/json"
+        )
 
         # Extract and preprocess input data
         data = np.array(input_data["data"]).reshape(1, 1, 128, 431).astype(np.float32)
@@ -39,12 +55,12 @@ def predict():
         return jsonify({
             "predicted_class": int(pred_class),
             "predicted_probability": float(pred_probability),
-            "anomaly_score": float(anomaly_score)
+            "anomaly_score": float(anomaly_score),
+            "s3_key": s3_key  # Return the S3 key for reference
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-
 
 @app.route("/", methods=["GET"])
 def home():
@@ -52,7 +68,7 @@ def home():
 
 
 # Define the AWS Lambda handler
-#lambda_handler = make_lambda_handler(app)
+lambda_handler = make_lambda_handler(app)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
