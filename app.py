@@ -1,45 +1,37 @@
-import os
 import boto3
 import json
 import numpy as np
 from pydub import AudioSegment
 import librosa
+import torch
+from model import CNN_RegDrop
+import os
+
+# Environment setting to avoid OpenMP conflicts
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Initialize the S3 client
 s3 = boto3.client('s3')
 
-# S3 bucket name
+# S3 bucket name and folder paths
 BUCKET_NAME = "audio-files-hanyang"
-
-# Paths for unprocessed and processed folders
-UNPROCESSED_FOLDER = "unprocessed/"
-PROCESSED_FOLDER = "processed/"
-
-# Local temporary folder for processing
+UNPROCESSED_FOLDER = "wav/"
+PROCESSED_FOLDER = "mel-spectro/"
 TEMP_FOLDER = "/tmp/audio_processing"
+
 if not os.path.exists(TEMP_FOLDER):
     os.makedirs(TEMP_FOLDER)
 
-
-def download_wav_files_from_s3(bucket_name, prefix):
-    """
-    Download .wav files from the specified S3 folder to the local temporary folder.
-    """
-    files = []
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-    for obj in response.get("Contents", []):
-        if obj["Key"].endswith(".wav"):
-            local_path = os.path.join(TEMP_FOLDER, os.path.basename(obj["Key"]))
-            s3.download_file(bucket_name, obj["Key"], local_path)
-            files.append(local_path)
-    return files
+# Load the trained model
+MODEL_PATH = "CNN_RegDrop.pt"
+device = "cpu"  # Change to "cuda" if running on GPU
+model = CNN_RegDrop()
+model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+model.to(device)
+model.eval()
 
 
 def ensure_five_seconds(audio):
-    """
-    Adjust the audio to be exactly 5 seconds long.
-    If shorter, pad with silence; if longer, trim to 5 seconds.
-    """
     duration = 5000
     if len(audio) < duration:
         silence = AudioSegment.silent(duration=duration - len(audio))
@@ -49,60 +41,72 @@ def ensure_five_seconds(audio):
     return audio
 
 
-def create_mel_spectrogram(file_path):
-    """
-    Create a Mel spectrogram from a .wav file.
-    """
-    y, sr = librosa.load(file_path, sr=22050)  # Load audio file with librosa
+def create_mel_spectrogram(file_path, target_width=431):
+    y, sr = librosa.load(file_path, sr=22050)
     mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=8000)
     mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-    return mel_spec_db
+    if mel_spec_db.shape[1] < target_width:
+        mel_spec_db = np.pad(mel_spec_db, ((0, 0), (0, target_width - mel_spec_db.shape[1])), mode='constant')
+    elif mel_spec_db.shape[1] > target_width:
+        mel_spec_db = mel_spec_db[:, :target_width]
+    return mel_spec_db.reshape(1, 1, 128, target_width).astype(np.float32)
 
 
-def process_wav_files(bucket_name):
-    """
-    Process .wav files from the S3 bucket:
-    - Ensure 5 seconds duration
-    - Create Mel spectrograms
-    - Create JSON payload for each file
-    - Save JSON to S3
-    """
-    # Download all .wav files from the "unprocessed" folder in the S3 bucket
-    files = download_wav_files_from_s3(bucket_name, UNPROCESSED_FOLDER)
+def predict_with_model(data):
+    data_tensor = torch.tensor(data).to(device)
+    with torch.no_grad():
+        outputs = model(data_tensor)
+        probabilities = torch.softmax(outputs, dim=1).cpu().numpy()
+    pred_class = np.argmax(probabilities)
+    pred_probability = probabilities[0][pred_class]
+    anomaly_score = -np.log(pred_probability)
+    return {
+        "predicted_class": int(pred_class),
+        "predicted_probability": float(pred_probability),
+        "anomaly_score": float(anomaly_score)
+    }
 
-    for file_path in files:
-        # Load the audio file with pydub
-        audio = AudioSegment.from_wav(file_path)
 
-        # Ensure the audio is exactly 5 seconds long
-        adjusted_audio = ensure_five_seconds(audio)
-
-        # Save the adjusted audio to a temporary file
-        adjusted_file_path = os.path.join(TEMP_FOLDER, "adjusted_" + os.path.basename(file_path))
-        adjusted_audio.export(adjusted_file_path, format="wav")
-
-        # Create Mel spectrogram
-        mel_spec = create_mel_spectrogram(adjusted_file_path)
-
-        # Convert the Mel spectrogram to JSON payload
-        data_list = mel_spec.tolist()
-        payload = {
-            "data": data_list
+def tag_file_as_processed(bucket_name, key):
+    s3.put_object_tagging(
+        Bucket=bucket_name,
+        Key=key,
+        Tagging={
+            "TagSet": [
+                {"Key": "Status", "Value": "Processed"}
+            ]
         }
-
-        # Save the JSON payload to the "processed" folder in S3
-        json_file_name = os.path.basename(file_path).replace(".wav", ".json")
-        s3_key = f"{PROCESSED_FOLDER}{json_file_name}"
-        s3.put_object(
-            Bucket=bucket_name,
-            Key=s3_key,
-            Body=json.dumps(payload),
-            ContentType="application/json"
-        )
-
-        print(f"Processed and saved JSON for {file_path} to S3: {s3_key}")
+    )
+    print(f"Tagged {key} as processed")
 
 
-# Run the processing function
-if __name__ == "__main__":
-    process_wav_files(BUCKET_NAME)
+def process_wav_file(bucket_name, object_key):
+    print(f"Processing file: {object_key}")
+    local_path = os.path.join(TEMP_FOLDER, os.path.basename(object_key))
+    s3.download_file(bucket_name, object_key, local_path)
+    audio = AudioSegment.from_wav(local_path)
+    adjusted_audio = ensure_five_seconds(audio)
+    adjusted_file_path = os.path.join(TEMP_FOLDER, "adjusted_" + os.path.basename(object_key))
+    adjusted_audio.export(adjusted_file_path, format="wav")
+    mel_spec = create_mel_spectrogram(adjusted_file_path)
+    prediction = predict_with_model(mel_spec)
+    print(f"Inference result for {object_key}: {prediction}")
+    payload = {"data": mel_spec.tolist(), "prediction": prediction}
+    json_file_path = os.path.basename(object_key).replace(".wav", ".json")
+    processed_s3_key = f"{PROCESSED_FOLDER}{json_file_path}"
+    s3.put_object(
+        Bucket=bucket_name,
+        Key=processed_s3_key,
+        Body=json.dumps(payload),
+        ContentType="application/json"
+    )
+    print(f"Saved JSON for {object_key} to {processed_s3_key}")
+    tag_file_as_processed(bucket_name, object_key)
+
+
+def lambda_handler(event, context):
+    for record in event['Records']:
+        bucket_name = record['s3']['bucket']['name']
+        object_key = record['s3']['object']['key']
+        if object_key.endswith(".wav") and object_key.startswith(UNPROCESSED_FOLDER):
+            process_wav_file(bucket_name, object_key)
