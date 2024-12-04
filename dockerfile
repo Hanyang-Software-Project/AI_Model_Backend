@@ -1,11 +1,14 @@
 # Use the official AWS Lambda Python runtime base image
 FROM public.ecr.aws/lambda/python:3.8
 
+# Set environment variables
+ENV NUMBA_CACHE_DIR=/tmp
+
 # Install required dependencies with no cache
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install torch==1.9.0+cpu torchvision==0.10.0+cpu \
     -f https://download.pytorch.org/whl/cpu/torch_stable.html \
-    && pip install numpy pydub librosa boto3
+    && pip install numpy librosa==0.9.2 numba==0.55.1 pydub boto3
 
 # Copy the application code and model into the container
 COPY app.py /var/task/app.py
