@@ -2,6 +2,7 @@ import json
 import boto3
 import os
 os.environ["NUMBA_CACHE_DIR"] = "/tmp"
+
 from pydub import AudioSegment
 import librosa
 import torch
@@ -75,19 +76,51 @@ def ensure_five_seconds(audio):
     return audio
 
 
-def create_mel_spectrogram(file_path, target_width=431):
-    y, sr = librosa.load(file_path, sr=22050)
-    mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=8000)
-    mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+import numpy as np
+import librosa
 
-    # Pad or trim the Mel spectrogram to match the target dimensions
-    if mel_spec_db.shape[1] < target_width:
-        mel_spec_db = np.pad(mel_spec_db, ((0, 0), (0, target_width - mel_spec_db.shape[1])), mode='constant')
-    elif mel_spec_db.shape[1] > target_width:
-        mel_spec_db = mel_spec_db[:, :target_width]
 
-    # Reshape to the required dimensions
-    mel_spec_reshaped = mel_spec_db.reshape(1, 1, 128, target_width).astype(np.float32)
+def create_mel_spectrogram(file_path, expected_duration=5, target_width=None):
+    # Load the audio file with its original sample rate
+    y, sr = librosa.load(file_path, sr=None)  # Dynamic sample rate
+
+    # Spectrogram parameters
+    n_fft = 2048
+    hop_length = 512
+    n_mels = 128
+
+    # Compute Mel spectrogram
+    mel_spec = librosa.feature.melspectrogram(
+        y=y,
+        sr=sr,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels
+    )
+
+    # Convert to decibel units with a fixed reference
+    mel_spec_db = librosa.power_to_db(mel_spec, ref=1e-12)
+
+    # Calculate expected number of frames for the given duration
+    expected_frames = int(np.ceil((sr * expected_duration) / hop_length))
+
+    # Pad or trim the Mel spectrogram to the expected number of frames
+    if mel_spec_db.shape[1] < expected_frames:
+        padding_amount = expected_frames - mel_spec_db.shape[1]
+        mel_spec_db = np.pad(mel_spec_db, ((0, 0), (0, padding_amount)), mode='constant')
+    elif mel_spec_db.shape[1] > expected_frames:
+        mel_spec_db = mel_spec_db[:, :expected_frames]
+
+    # If a specific target width is given, apply additional padding/trimming
+    if target_width:
+        if mel_spec_db.shape[1] < target_width:
+            mel_spec_db = np.pad(mel_spec_db, ((0, 0), (0, target_width - mel_spec_db.shape[1])), mode='constant')
+        elif mel_spec_db.shape[1] > target_width:
+            mel_spec_db = mel_spec_db[:, :target_width]
+
+    # Reshape to match model input dimensions (1, 1, 128, target_width/expected_frames)
+    mel_spec_reshaped = mel_spec_db.reshape(1, 1, 128, mel_spec_db.shape[1]).astype(np.float32)
+
     return mel_spec_reshaped
 
 
@@ -96,6 +129,7 @@ def predict_with_model(data):
     with torch.no_grad():
         outputs = model(data_tensor)
         probabilities = torch.softmax(outputs, dim=1).cpu().numpy()
+
     pred_class = np.argmax(probabilities)
     pred_probability = probabilities[0][pred_class]
     anomaly_score = -np.log(pred_probability)
