@@ -1,6 +1,8 @@
 import json
 import boto3
 import os
+import requests
+
 os.environ["NUMBA_CACHE_DIR"] = "/tmp"
 
 from pydub import AudioSegment
@@ -26,6 +28,10 @@ def lambda_handler(event, context):
             bucket_name = record['s3']['bucket']['name']
             object_key = record['s3']['object']['key']
             print(f"Processing file: {object_key} from bucket: {bucket_name}")
+
+            # Extract only the original filename (remove ID prefix if present)
+            trimmed_filename = object_key.split("_", 1)[-1]
+            print(f"Trimmed filename: {trimmed_filename}")
 
             # Download the file locally
             temp_file_path = f"/tmp/{os.path.basename(object_key)}"
@@ -60,6 +66,23 @@ def lambda_handler(event, context):
             )
 
             print(f"Processed file {object_key} and saved results to processed/")
+
+            if prediction['predicted_class'] != 0:
+                # Make POST request to API if there is a result
+                api_url = "http://3.24.110.71:8080/alerts"
+                trimmed_filename=trimmed_filename
+                payload = {
+                    "filePath": trimmed_filename
+                }
+
+                print(trimmed_filename)
+                print("payload: ", payload)
+                response = requests.post(api_url, json=payload)
+
+                if response.status_code == 200 or response.status_code == 201:
+                    print(f"Successfully sent POST request to {api_url} with payload: {payload}")
+                else:
+                    print(f"Failed to send POST request. Status code: {response.status_code}, Response: {response.text}")
 
     except Exception as e:
         print(f"Error processing file: {e}")
@@ -133,8 +156,9 @@ def predict_with_model(data):
     pred_class = np.argmax(probabilities)
     pred_probability = probabilities[0][pred_class]
     anomaly_score = -np.log(pred_probability)
+
+
     return {
         "predicted_class": int(pred_class),
         "predicted_probability": float(pred_probability),
-        "anomaly_score": float(anomaly_score)
     }
